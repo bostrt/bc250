@@ -60,14 +60,34 @@ def parse_pwm(value: str, description: str) -> int:
     return pwm
 
 
+DEFAULT_SETTINGS = Settings(
+    poll_interval_seconds=3.0,
+    curve=(
+        (50.0, 60),
+        (60.0, 120),
+        (70.0, 160),
+        (80.0, 200),
+        (85.0, 230),
+    ),
+    default_pwm=255,
+)
+
+
 def load_settings(path: Path) -> Settings:
-    parser = configparser.ConfigParser(interpolation=None)
+    parser = configparser.ConfigParser(
+        interpolation=None,
+        inline_comment_prefixes=("#", ";"),
+    )
 
     try:
         with path.open(encoding="utf-8") as config_file:
             parser.read_file(config_file)
-    except FileNotFoundError as exc:
-        raise FanCurveError(f"configuration file not found: {path}") from exc
+    except FileNotFoundError:
+        logging.warning(
+            "configuration file not found: %s; using built-in defaults",
+            path,
+        )
+        return DEFAULT_SETTINGS
     except (OSError, configparser.Error) as exc:
         raise FanCurveError(f"cannot read configuration file {path}: {exc}") from exc
 
@@ -207,7 +227,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--config",
         type=Path,
         default=DEFAULT_CONFIG,
-        help=f"configuration file (default: {DEFAULT_CONFIG})",
+        help=(
+            f"configuration file (default: {DEFAULT_CONFIG}; "
+            "built-in defaults are used if it is missing)"
+        ),
     )
     parser.add_argument(
         "--hwmon-root",

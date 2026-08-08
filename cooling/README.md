@@ -16,5 +16,8 @@ degrees Celsius and its value is the PWM setting to use from 0 through 255.
 Thresholds may be integers or decimals and are sorted numerically. Temperatures
 above the highest threshold use `default`.
 
-`poll_interval_seconds` must be greater than zero. Restart the service on the
+`poll_interval_seconds` must be greater than zero. If the configuration file is
+missing, the controller uses built-in defaults matching `bc250-fancurve.conf`.
+Malformed or incomplete configuration files still cause startup to fail, so
+configuration mistakes are not silently ignored. Restart the service on the
 target system after changing the configuration.
