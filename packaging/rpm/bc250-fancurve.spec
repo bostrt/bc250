@@ -32,6 +32,8 @@ install -Dpm 0644 cooling/bc250-fancurve.conf \
     %{buildroot}%{_sysconfdir}/bc250-fancurve.conf
 install -Dpm 0644 cooling/bc250-fancurve.service \
     %{buildroot}%{_unitdir}/bc250-fancurve.service
+install -Dpm 0644 cooling/README.md \
+    %{buildroot}%{_docdir}/%{name}/cooling-README.md
 
 %post
 %systemd_post bc250-fancurve.service
@@ -43,7 +45,8 @@ install -Dpm 0644 cooling/bc250-fancurve.service \
 %systemd_postun_with_restart bc250-fancurve.service
 
 %files
-%doc README.md PROJECT.md cooling/README.md
+%doc README.md PROJECT.md
+%{_docdir}/%{name}/cooling-README.md
 %{_bindir}/bc250-fancurve
 %config(noreplace) %{_sysconfdir}/bc250-fancurve.conf
 %{_unitdir}/bc250-fancurve.service
