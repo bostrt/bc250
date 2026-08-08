@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""Temperature-based fan control for the AMD BC250."""
+
+from __future__ import annotations
+
+import argparse
+import configparser
+import logging
+import math
+import os
+import signal
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+from threading import Event
+from types import FrameType
+from typing import Sequence
+
+
+PROGRAM = "bc250-fancurve"
+DEFAULT_CONFIG = Path("/etc/bc250-fancurve.conf")
+DEFAULT_HWMON_ROOT = Path("/sys/class/hwmon")
+FAN_CONTROLLER_NAME = "nct6686"
+TEMPERATURE_SENSOR_NAME = "k10temp"
+FAILSAFE_PWM = 255
+
+
+class FanCurveError(RuntimeError):
+    """An expected configuration or hardware error."""
+
+
+@dataclass(frozen=True)
+class Settings:
+    poll_interval_seconds: float
+    curve: tuple[tuple[float, int], ...]
+    default_pwm: int
+
+    def pwm_for(self, temperature_c: float) -> int:
+        for maximum_temperature, pwm in self.curve:
+            if temperature_c <= maximum_temperature:
+                return pwm
+        return self.default_pwm
+
+
+@dataclass(frozen=True)
+class HwmonPaths:
+    pwm: Path
+    pwm_enable: Path
+    temperature_input: Path
+
+
+def parse_pwm(value: str, description: str) -> int:
+    try:
+        pwm = int(value)
+    except ValueError as exc:
+        raise FanCurveError(f"{description} must be an integer, got {value!r}") from exc
+
+    if not 0 <= pwm <= 255:
+        raise FanCurveError(f"{description} must be between 0 and 255, got {pwm}")
+    return pwm
+
+
+def load_settings(path: Path) -> Settings:
+    parser = configparser.ConfigParser(interpolation=None)
+
+    try:
+        with path.open(encoding="utf-8") as config_file:
+            parser.read_file(config_file)
+    except FileNotFoundError as exc:
+        raise FanCurveError(f"configuration file not found: {path}") from exc
+    except (OSError, configparser.Error) as exc:
+        raise FanCurveError(f"cannot read configuration file {path}: {exc}") from exc
+
+    try:
+        poll_interval = parser.getfloat("service", "poll_interval_seconds")
+    except (configparser.Error, ValueError) as exc:
+        raise FanCurveError(
+            f"{path}: [service] poll_interval_seconds must be a number"
+        ) from exc
+
+    if not math.isfinite(poll_interval) or poll_interval <= 0:
+        raise FanCurveError(
+            f"{path}: poll_interval_seconds must be a finite number greater than zero"
+        )
+
+    if not parser.has_section("curve"):
+        raise FanCurveError(f"{path}: missing required [curve] section")
+
+    curve: list[tuple[float, int]] = []
+    default_pwm: int | None = None
+    thresholds: set[float] = set()
+
+    for threshold_text, pwm_text in parser.items("curve"):
+        if threshold_text == "default":
+            default_pwm = parse_pwm(pwm_text, f"{path}: curve default PWM")
+            continue
+
+        try:
+            threshold = float(threshold_text)
+        except ValueError as exc:
+            raise FanCurveError(
+                f"{path}: curve threshold {threshold_text!r} must be a temperature"
+            ) from exc
+
+        if not math.isfinite(threshold):
+            raise FanCurveError(
+                f"{path}: curve threshold {threshold_text!r} must be finite"
+            )
+        if threshold in thresholds:
+            raise FanCurveError(f"{path}: duplicate curve threshold {threshold:g}")
+
+        thresholds.add(threshold)
+        curve.append(
+            (threshold, parse_pwm(pwm_text, f"{path}: PWM at {threshold:g} C"))
+        )
+
+    if not curve:
+        raise FanCurveError(f"{path}: [curve] must contain at least one threshold")
+    if default_pwm is None:
+        raise FanCurveError(f"{path}: [curve] must define a default PWM")
+
+    curve.sort()
+    return Settings(poll_interval, tuple(curve), default_pwm)
+
+
+def find_hwmon(root: Path, expected_name: str) -> Path:
+    if not root.is_dir():
+        raise FanCurveError(f"hwmon class directory is unavailable: {root}")
+
+    for name_file in sorted(root.glob("hwmon*/name")):
+        try:
+            hwmon_name = name_file.read_text(encoding="ascii").strip()
+        except OSError:
+            continue
+
+        if hwmon_name == expected_name:
+            return name_file.parent
+
+    raise FanCurveError(f"hwmon device {expected_name!r} was not found under {root}")
+
+
+def require_access(path: Path, mode: int, description: str) -> None:
+    if not path.exists():
+        raise FanCurveError(f"{description} is unavailable: {path}")
+    if not os.access(path, mode):
+        raise FanCurveError(f"cannot access {description}: {path}")
+
+
+def discover_paths(root: Path) -> HwmonPaths:
+    fan_hwmon = find_hwmon(root, FAN_CONTROLLER_NAME)
+    temperature_hwmon = find_hwmon(root, TEMPERATURE_SENSOR_NAME)
+    paths = HwmonPaths(
+        pwm=fan_hwmon / "pwm2",
+        pwm_enable=fan_hwmon / "pwm2_enable",
+        temperature_input=temperature_hwmon / "temp1_input",
+    )
+
+    require_access(paths.pwm, os.W_OK, "fan PWM control")
+    require_access(paths.pwm_enable, os.W_OK, "manual PWM control")
+    require_access(paths.temperature_input, os.R_OK, "CPU temperature input")
+    return paths
+
+
+def write_value(path: Path, value: int, description: str) -> None:
+    try:
+        path.write_text(f"{value}\n", encoding="ascii")
+    except OSError as exc:
+        raise FanCurveError(f"failed to write {description} at {path}: {exc}") from exc
+
+
+def read_temperature(path: Path) -> float:
+    try:
+        raw_temperature = path.read_text(encoding="ascii").strip()
+    except OSError as exc:
+        raise FanCurveError(f"failed to read CPU temperature from {path}: {exc}") from exc
+
+    try:
+        return int(raw_temperature) / 1000
+    except ValueError as exc:
+        raise FanCurveError(
+            f"invalid CPU temperature value from {path}: {raw_temperature!r}"
+        ) from exc
+
+
+def run_controller(settings: Settings, paths: HwmonPaths, stop: Event) -> None:
+    logging.info("fan controller: %s", paths.pwm.parent)
+    logging.info("temperature sensor: %s", paths.temperature_input.parent)
+
+    try:
+        write_value(paths.pwm_enable, 1, "manual PWM control")
+
+        while not stop.is_set():
+            temperature_c = read_temperature(paths.temperature_input)
+            pwm = settings.pwm_for(temperature_c)
+            write_value(paths.pwm, pwm, "fan PWM")
+            stop.wait(settings.poll_interval_seconds)
+    finally:
+        try:
+            write_value(paths.pwm, FAILSAFE_PWM, "failsafe fan PWM")
+        except FanCurveError as exc:
+            logging.error("%s", exc)
+
+
+def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG,
+        help=f"configuration file (default: {DEFAULT_CONFIG})",
+    )
+    parser.add_argument(
+        "--hwmon-root",
+        type=Path,
+        default=DEFAULT_HWMON_ROOT,
+        help=argparse.SUPPRESS,
+    )
+    return parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = parse_args(argv)
+    logging.basicConfig(
+        level=logging.INFO,
+        format=f"{PROGRAM}: %(levelname)s: %(message)s",
+    )
+
+    stop = Event()
+
+    def request_stop(signum: int, _frame: FrameType | None) -> None:
+        logging.info("received %s; stopping", signal.Signals(signum).name)
+        stop.set()
+
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
+
+    try:
+        settings = load_settings(args.config)
+        paths = discover_paths(args.hwmon_root)
+        run_controller(settings, paths, stop)
+    except FanCurveError as exc:
+        logging.error("%s", exc)
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

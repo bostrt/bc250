@@ -1,0 +1,14 @@
+[Unit]
+Description=AMD BC250 fan curve controller
+After=systemd-modules-load.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/local/bin/bc250-fancurve --config /etc/bc250-fancurve.conf
+Restart=on-failure
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target

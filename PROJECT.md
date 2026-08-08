@@ -10,6 +10,7 @@ Canonical, compact context for this AMD BC-250 build. Keep durable facts and dec
 ## Linux / cooling
 
 - Custom fan-control script: `/usr/local/bin/bc250-fancurve`
+- Fan-curve configuration: `/etc/bc250-fancurve.conf`
 - Fan controller hwmon device: `nct6686`
 - CPU temperature hwmon device: `k10temp`
 - `/sys/class/hwmon/hwmonN` numbering is not stable across reboots or kernel changes; scripts should discover devices using `/sys/class/hwmon/hwmon*/name`.
