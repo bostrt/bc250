@@ -6,7 +6,7 @@ StartLimitIntervalSec=0
 [Service]
 Type=simple
 User=root
-ExecStart=/usr/local/bin/bc250-fancurve --config /etc/bc250-fancurve.conf
+ExecStart=/usr/bin/bc250-fancurve --config /etc/bc250-fancurve.conf
 Restart=on-failure
 RestartSec=5s
 

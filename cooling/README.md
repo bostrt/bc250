@@ -2,9 +2,9 @@
 
 This directory contains the files for the target BC250 system:
 
-- `bc250-fancurve` -> `/usr/local/bin/bc250-fancurve`
+- `bc250-fancurve` -> `/usr/bin/bc250-fancurve`
 - `bc250-fancurve.conf` -> `/etc/bc250-fancurve.conf`
-- `bc250-fancurve.service` -> `/etc/systemd/system/bc250-fancurve.service`
+- `bc250-fancurve.service` -> `/usr/lib/systemd/system/bc250-fancurve.service` when installed from the RPM
 
 The controller uses only the Python 3 standard library. It discovers `nct6686`
 and `k10temp` from their hwmon `name` files each time it starts.
@@ -20,4 +20,6 @@ above the highest threshold use `default`.
 missing, the controller uses built-in defaults matching `bc250-fancurve.conf`.
 Malformed or incomplete configuration files still cause startup to fail, so
 configuration mistakes are not silently ignored. Restart the service on the
-target system after changing the configuration.
+target system after changing the configuration. The files can be installed
+manually, or through the `bc250-fancurve` RPM described in
+[`../packaging/rpm/README.md`](../packaging/rpm/README.md).
